@@ -16,6 +16,14 @@ public static class DiscoveryEndpoints
             OsmSpatialIndex spatialIndex,
             ILogger<OsmSpatialIndex> logger) =>
         {
+            logger.LogInformation("Received request for {Count} random nodes at lat:{Lat}, lon:{Lon} with radius {Radius}m",
+                request.Count, request.Lat, request.Lon, request.Radius);
+
+            if (spatialIndex.HasError)
+            {
+                return Results.Json(new { message = "Spatial indexing failed." }, statusCode: 500);
+            }
+
             if (!spatialIndex.IsReady)
             {
                 return Results.Json(new { message = "Service is still indexing spatial data." }, statusCode: 503);
@@ -27,9 +35,24 @@ public static class DiscoveryEndpoints
                 return Results.Json(new { message = "Spatial index failed to initialize." }, statusCode: 500);
             }
 
+            if (request.Lat < -90 || request.Lat > 90 || request.Lon < -180 || request.Lon > 180)
+            {
+                return Results.BadRequest(new { message = "Invalid lat/lon coordinates." });
+            }
+
             if (request.Count <= 0 || request.Radius <= 0)
             {
                 return Results.BadRequest(new { message = "Count and Radius must be greater than 0." });
+            }
+
+            if (request.Count > 10000)
+            {
+                return Results.BadRequest(new { message = "Count cannot exceed 10,000." });
+            }
+
+            if (request.Radius > 100000)
+            {
+                return Results.BadRequest(new { message = "Radius cannot exceed 100,000 meters." });
             }
 
             // 1. Calculate bounding box for the radius
@@ -71,6 +94,8 @@ public static class DiscoveryEndpoints
             int countToReturn = Math.Min(request.Count, validCandidates.Count);
             var responseList = new List<PointResponse>(countToReturn);
 
+            logger.LogInformation("Found {Count} valid candidates within true radius.", validCandidates.Count);
+
             if (countToReturn == validCandidates.Count)
             {
                 for (int i = 0; i < validCandidates.Count; i++)
@@ -80,7 +105,6 @@ public static class DiscoveryEndpoints
             }
             else
             {
-                var random = new Random();
                 // Initialize array of indices
                 var indices = new int[validCandidates.Count];
                 for (int i = 0; i < indices.Length; i++)
@@ -91,7 +115,7 @@ public static class DiscoveryEndpoints
                 // Partial Fisher-Yates to pick exactly 'countToReturn' unique indices
                 for (int i = 0; i < countToReturn; i++)
                 {
-                    int j = random.Next(i, indices.Length);
+                    int j = Random.Shared.Next(i, indices.Length);
 
                     // Swap
                     int temp = indices[i];

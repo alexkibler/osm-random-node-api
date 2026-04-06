@@ -11,8 +11,10 @@ public class OsmSpatialIndex : IHostedService
     private readonly ILogger<OsmSpatialIndex> _logger;
     private readonly string _dataDirectory;
     private STRtree<MinimalNode>? _index;
+    private readonly object _indexLock = new();
 
     public bool IsReady { get; private set; }
+    public bool HasError { get; private set; }
 
     public OsmSpatialIndex(ILogger<OsmSpatialIndex> logger, IConfiguration configuration)
     {
@@ -20,7 +22,13 @@ public class OsmSpatialIndex : IHostedService
         _dataDirectory = configuration.GetValue<string>("DataDirectory") ?? "/app/data";
     }
 
-    public STRtree<MinimalNode>? GetIndex() => _index;
+    public STRtree<MinimalNode>? GetIndex()
+    {
+        lock (_indexLock)
+        {
+            return _index;
+        }
+    }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -43,7 +51,7 @@ public class OsmSpatialIndex : IHostedService
         try
         {
             var sw = Stopwatch.StartNew();
-            _index = new STRtree<MinimalNode>();
+            var newIndex = new STRtree<MinimalNode>();
 
             if (!Directory.Exists(_dataDirectory))
             {
@@ -58,12 +66,17 @@ public class OsmSpatialIndex : IHostedService
             foreach (var file in pbfFiles)
             {
                 if (cancellationToken.IsCancellationRequested) break;
-                ProcessPbfFile(file);
+                ProcessPbfFile(file, newIndex, cancellationToken);
             }
 
             _logger.LogInformation("Building STRtree spatial index...");
-            _index.Build();
+            newIndex.Build();
             sw.Stop();
+
+            lock (_indexLock)
+            {
+                _index = newIndex;
+            }
 
             _logger.LogInformation("OsmSpatialIndex build complete in {ElapsedMilliseconds}ms.", sw.ElapsedMilliseconds);
             IsReady = true;
@@ -71,11 +84,12 @@ public class OsmSpatialIndex : IHostedService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error building OsmSpatialIndex.");
-            IsReady = true; // Set to true even on failure so we don't return 503 forever, but queries will fail/return empty
+            HasError = true;
+            IsReady = true;
         }
     }
 
-    private void ProcessPbfFile(string filePath)
+    private void ProcessPbfFile(string filePath, STRtree<MinimalNode> treeIndex, CancellationToken cancellationToken)
     {
         var memBefore = GC.GetTotalMemory(true);
         _logger.LogInformation("Processing {File}. Memory before: {Memory} bytes.", Path.GetFileName(filePath), memBefore);
@@ -89,6 +103,8 @@ public class OsmSpatialIndex : IHostedService
 
             foreach (var element in source)
             {
+                if (cancellationToken.IsCancellationRequested) return;
+
                 if (element.Type == OsmSharp.OsmGeoType.Way && element is OsmSharp.Way way)
                 {
                     if (IsValidWay(way))
@@ -136,6 +152,8 @@ public class OsmSpatialIndex : IHostedService
 
             foreach (var element in source)
             {
+                if (cancellationToken.IsCancellationRequested) return;
+
                 if (element.Type == OsmSharp.OsmGeoType.Node && element is OsmSharp.Node node)
                 {
                     if (node.Id.HasValue && node.Longitude.HasValue && node.Latitude.HasValue)
@@ -144,7 +162,7 @@ public class OsmSpatialIndex : IHostedService
                         {
                             var minimalNode = new MinimalNode((float)node.Longitude.Value, (float)node.Latitude.Value);
                             var env = new Envelope(minimalNode.Lon, minimalNode.Lon, minimalNode.Lat, minimalNode.Lat);
-                            _index!.Insert(env, minimalNode);
+                            treeIndex.Insert(env, minimalNode);
                             addedNodes++;
                         }
                     }
@@ -157,8 +175,6 @@ public class OsmSpatialIndex : IHostedService
         validNodeIds.Clear();
         validNodeIds.TrimExcess();
 
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
         GC.Collect();
 
         var memAfter = GC.GetTotalMemory(true);
