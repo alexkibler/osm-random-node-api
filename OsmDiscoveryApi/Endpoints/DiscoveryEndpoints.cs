@@ -67,31 +67,40 @@ public static class DiscoveryEndpoints
                 return Results.Ok(Array.Empty<PointResponse>());
             }
 
-            // 4. Reservoir sampling
+            // 4. Optimized Selection (Partial Fisher-Yates)
             int countToReturn = Math.Min(request.Count, validCandidates.Count);
-            var resultList = new MinimalNode[countToReturn];
-            var random = new Random();
+            var responseList = new List<PointResponse>(countToReturn);
 
-            for (int i = 0; i < validCandidates.Count; i++)
+            if (countToReturn == validCandidates.Count)
             {
-                if (i < countToReturn)
+                for (int i = 0; i < validCandidates.Count; i++)
                 {
-                    resultList[i] = validCandidates[i];
-                }
-                else
-                {
-                    int j = random.Next(i + 1);
-                    if (j < countToReturn)
-                    {
-                        resultList[j] = validCandidates[i];
-                    }
+                    responseList.Add(new PointResponse(validCandidates[i].Lon, validCandidates[i].Lat));
                 }
             }
-
-            var responseList = new List<PointResponse>(countToReturn);
-            for (int i = 0; i < countToReturn; i++)
+            else
             {
-                responseList.Add(new PointResponse(resultList[i].Lon, resultList[i].Lat));
+                var random = new Random();
+                // Initialize array of indices
+                var indices = new int[validCandidates.Count];
+                for (int i = 0; i < indices.Length; i++)
+                {
+                    indices[i] = i;
+                }
+
+                // Partial Fisher-Yates to pick exactly 'countToReturn' unique indices
+                for (int i = 0; i < countToReturn; i++)
+                {
+                    int j = random.Next(i, indices.Length);
+
+                    // Swap
+                    int temp = indices[i];
+                    indices[i] = indices[j];
+                    indices[j] = temp;
+
+                    var candidate = validCandidates[indices[i]];
+                    responseList.Add(new PointResponse(candidate.Lon, candidate.Lat));
+                }
             }
 
             return Results.Ok(responseList);

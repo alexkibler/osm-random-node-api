@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine AS build
 WORKDIR /src
 COPY ["OsmDiscoveryApi/OsmDiscoveryApi.csproj", "OsmDiscoveryApi/"]
 RUN dotnet restore "OsmDiscoveryApi/OsmDiscoveryApi.csproj"
