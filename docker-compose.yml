@@ -1,0 +1,18 @@
+services:
+  osm-discovery-api:
+    build:
+      context: ./OsmDiscoveryApi
+      dockerfile: Dockerfile
+    container_name: osm-discovery-api
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./graphhopper/data:/app/data:ro
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - DataDirectory=/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    restart: unless-stopped
