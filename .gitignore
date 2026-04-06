@@ -3,3 +3,6 @@ obj/
 *.user
 .idea/
 .vscode/
+.DS_Store
+.DS_Store
+OsmDiscoveryApi/.DS_Store
