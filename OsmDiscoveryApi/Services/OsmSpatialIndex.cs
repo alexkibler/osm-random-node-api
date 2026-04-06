@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using NetTopologySuite.Index.Strtree;
 using OsmSharp.Streams;
 using OsmDiscoveryApi.Models;
@@ -60,13 +61,68 @@ public class OsmSpatialIndex : IHostedService
                 return;
             }
 
-            var pbfFiles = Directory.GetFiles(_dataDirectory, "*.osm.pbf");
-            _logger.LogInformation("Found {Count} .osm.pbf files in {DataDirectory}.", pbfFiles.Length, _dataDirectory);
-
-            foreach (var file in pbfFiles)
+            var regionFile = Path.Combine(_dataDirectory, "region.osm.pbf");
+            if (!File.Exists(regionFile))
             {
-                if (cancellationToken.IsCancellationRequested) break;
-                ProcessPbfFile(file, newIndex, cancellationToken);
+                _logger.LogWarning("region.osm.pbf not found in {DataDirectory}.", _dataDirectory);
+                IsReady = true;
+                return;
+            }
+
+            var cacheFile = Path.Combine(_dataDirectory, "graph-cache", "osm-discovery-nodes.json");
+            var cacheDir = Path.GetDirectoryName(cacheFile)!;
+
+            // Try loading from cache first
+            if (File.Exists(cacheFile))
+            {
+                _logger.LogInformation("Loading nodes from cache {CacheFile}...", cacheFile);
+                try
+                {
+                    var json = await File.ReadAllTextAsync(cacheFile, cancellationToken);
+                    var nodes = JsonSerializer.Deserialize<List<float[]>>(json) ?? new();
+
+                    foreach (var node in nodes)
+                    {
+                        if (node.Length == 2)
+                        {
+                            var minimalNode = new MinimalNode(node[0], node[1]);
+                            var env = new Envelope(minimalNode.Lon, minimalNode.Lon, minimalNode.Lat, minimalNode.Lat);
+                            newIndex.Insert(env, minimalNode);
+                        }
+                    }
+
+                    _logger.LogInformation("Loaded {Count} nodes from cache.", nodes.Count);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to load from cache, will reprocess PBF.");
+                    newIndex = new STRtree<MinimalNode>();
+                }
+            }
+
+            // If cache was empty or failed, process PBF
+            List<float[]>? cachedNodes = null;
+            if (newIndex == null || !File.Exists(cacheFile))
+            {
+                _logger.LogInformation("Building index from PBF...");
+                cachedNodes = ProcessPbfFile(regionFile, newIndex, cancellationToken);
+                newIndex = newIndex ?? new STRtree<MinimalNode>();
+
+                // Save cache
+                if (cachedNodes != null)
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(cacheDir);
+                        var json = JsonSerializer.Serialize(cachedNodes);
+                        await File.WriteAllTextAsync(cacheFile, json, cancellationToken);
+                        _logger.LogInformation("Saved {Count} nodes to cache {CacheFile}.", cachedNodes.Count, cacheFile);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to save cache file.");
+                    }
+                }
             }
 
             _logger.LogInformation("Building STRtree spatial index...");
@@ -89,7 +145,7 @@ public class OsmSpatialIndex : IHostedService
         }
     }
 
-    private void ProcessPbfFile(string filePath, STRtree<MinimalNode> treeIndex, CancellationToken cancellationToken)
+    private List<float[]> ProcessPbfFile(string filePath, STRtree<MinimalNode>? treeIndex, CancellationToken cancellationToken)
     {
         var memBefore = GC.GetTotalMemory(true);
         _logger.LogInformation("Processing {File}. Memory before: {Memory} bytes.", Path.GetFileName(filePath), memBefore);
@@ -103,7 +159,7 @@ public class OsmSpatialIndex : IHostedService
 
             foreach (var element in source)
             {
-                if (cancellationToken.IsCancellationRequested) return;
+                if (cancellationToken.IsCancellationRequested) return new();
 
                 if (element.Type == OsmSharp.OsmGeoType.Way && element is OsmSharp.Way way)
                 {
@@ -146,13 +202,14 @@ public class OsmSpatialIndex : IHostedService
 
         // Pass 2: Extract nodes matching the collected IDs
         int addedNodes = 0;
+        var extractedNodes = new List<float[]>();
         using (var fileStream = File.OpenRead(filePath))
         {
             var source = new PBFOsmStreamSource(fileStream);
 
             foreach (var element in source)
             {
-                if (cancellationToken.IsCancellationRequested) return;
+                if (cancellationToken.IsCancellationRequested) return new();
 
                 if (element.Type == OsmSharp.OsmGeoType.Node && element is OsmSharp.Node node)
                 {
@@ -161,8 +218,13 @@ public class OsmSpatialIndex : IHostedService
                         if (validNodeIds.BinarySearch(node.Id.Value) >= 0)
                         {
                             var minimalNode = new MinimalNode((float)node.Longitude.Value, (float)node.Latitude.Value);
-                            var env = new Envelope(minimalNode.Lon, minimalNode.Lon, minimalNode.Lat, minimalNode.Lat);
-                            treeIndex.Insert(env, minimalNode);
+                            extractedNodes.Add(new[] { minimalNode.Lon, minimalNode.Lat });
+
+                            if (treeIndex != null)
+                            {
+                                var env = new Envelope(minimalNode.Lon, minimalNode.Lon, minimalNode.Lat, minimalNode.Lat);
+                                treeIndex.Insert(env, minimalNode);
+                            }
                             addedNodes++;
                         }
                     }
@@ -180,6 +242,8 @@ public class OsmSpatialIndex : IHostedService
         var memAfter = GC.GetTotalMemory(true);
         _logger.LogInformation("Finished processing {File}. Memory after GC: {Memory} bytes. Memory diff: {Diff} bytes.",
             Path.GetFileName(filePath), memAfter, memAfter - memBefore);
+
+        return extractedNodes;
     }
 
     private bool IsValidWay(OsmSharp.Way way)
